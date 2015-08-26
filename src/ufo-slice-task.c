@@ -178,11 +178,10 @@ ufo_slice_task_generate (UfoTask *task,
     priv->current++;
 #else
     if (priv->in_mem) {
-        cl_mem out_mem = ufo_buffer_get_device_array (output, priv->cmd_queue);
         int offset = priv->current * ufo_buffer_get_size (output) / sizeof (float);
 
         UFO_RESOURCES_CHECK_CLERR (clSetKernelArg (priv->kernel, 0, sizeof (cl_mem), &priv->in_mem));
-        UFO_RESOURCES_CHECK_CLERR (clSetKernelArg (priv->kernel, 1, sizeof (cl_mem), &out_mem));
+        UFO_RESOURCES_CHECK_CLERR (clSetKernelArg (priv->kernel, 1, sizeof (cl_mem), &priv->out_mem));
         UFO_RESOURCES_CHECK_CLERR (clSetKernelArg (priv->kernel, 2, sizeof (int), &offset));
 
         UFO_RESOURCES_CHECK_CLERR (clEnqueueNDRangeKernel (priv->cmd_queue,
