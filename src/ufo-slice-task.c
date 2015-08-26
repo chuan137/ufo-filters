@@ -17,6 +17,12 @@
  * License along with this library.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#ifdef __APPLE__
+#include <OpenCL/cl.h>
+#else
+#include <CL/cl.h>
+#endif
+
 #include <string.h>
 #include "ufo-slice-task.h"
 
@@ -26,6 +32,12 @@ struct _UfoSliceTaskPrivate {
     gsize size;
     guint current;
     guint last;
+
+    cl_context context;
+    cl_command_queue cmd_queue;
+    cl_kernel kernel;
+    cl_mem in_mem;
+    cl_mem out_mem;
 };
 
 static void ufo_task_interface_init (UfoTaskIface *iface);
@@ -52,6 +64,19 @@ ufo_slice_task_setup (UfoTask *task,
                       UfoResources *resources,
                       GError **error)
 {
+    UfoSliceTaskPrivate *priv;
+    UfoGpuNode *node;
+
+    priv = UFO_SLICE_TASK_GET_PRIVATE (task);
+    node = UFO_GPU_NODE (ufo_task_node_get_proc_node (UFO_TASK_NODE (task)));
+
+    priv->context = ufo_resources_get_context (resources);
+    priv->cmd_queue = ufo_gpu_node_get_cmd_queue (node);
+
+    priv->kernel = ufo_resources_get_kernel (resources, "default.cl", "convert_u16", error);
+
+    if (priv->kernel != NULL)
+        UFO_RESOURCES_CHECK_CLERR (clRetainKernel (priv->kernel));
 }
 
 static void
@@ -90,9 +115,11 @@ ufo_slice_task_get_num_dimensions (UfoTask *task,
 static UfoTaskMode
 ufo_slice_task_get_mode (UfoTask *task)
 {
-    return UFO_TASK_MODE_REDUCTOR | UFO_TASK_MODE_CPU;
+    return UFO_TASK_MODE_REDUCTOR | UFO_TASK_MODE_GPU;
 }
 
+#undef NEW
+#define NEW
 static gboolean
 ufo_slice_task_process (UfoTask *task,
                         UfoBuffer **inputs,
@@ -104,11 +131,27 @@ ufo_slice_task_process (UfoTask *task,
     priv = UFO_SLICE_TASK_GET_PRIVATE (task);
     priv->copy = ufo_buffer_dup (inputs[0]);
 
+#ifndef NEW
     /* Force CPU memory */
     ufo_buffer_get_host_array (priv->copy, NULL);
 
     /* Move data */
     ufo_buffer_copy (inputs[0], priv->copy);
+#else
+    if (ufo_buffer_get_location(inputs[0]) == 1) 
+    {
+        priv->in_mem = ufo_buffer_get_device_array (inputs[0], priv->cmd_queue);
+        priv->out_mem = ufo_buffer_get_device_array (output, priv->cmd_queue);
+    } 
+    else 
+    {
+        priv->in_mem = NULL;
+        /* Force CPU memory */
+        ufo_buffer_get_host_array (priv->copy, NULL);
+        /* Move data */
+        ufo_buffer_copy (inputs[0], priv->copy);
+    }
+#endif
 
     return FALSE;
 }
@@ -128,11 +171,31 @@ ufo_slice_task_generate (UfoTask *task,
         priv->current = 0;
         return FALSE;
     }
-
+#ifndef NEW
     src = ufo_buffer_get_host_array (priv->copy, NULL);
     dst = ufo_buffer_get_host_array (output, NULL);
     memcpy (dst, src + priv->current * priv->size / sizeof(gfloat), priv->size);
     priv->current++;
+#else
+    if (priv->in_mem) {
+        cl_mem out_mem = ufo_buffer_get_device_array (output, priv->cmd_queue);
+
+        UFO_RESOURCES_CHECK_CLERR (clSetKernelArg (priv->kernel, 0, sizeof (cl_mem), &priv->in_mem));
+        UFO_RESOURCES_CHECK_CLERR (clSetKernelArg (priv->kernel, 1, sizeof (cl_mem), &out_mem));
+
+        UFO_RESOURCES_CHECK_CLERR (clEnqueueNDRangeKernel (priv->cmd_queue,
+                                                           priv->kernel,
+                                                           2, NULL, requisition->dims, NULL,
+                                                           0, NULL, NULL));
+    }
+    else
+    {
+        src = ufo_buffer_get_host_array (priv->copy, NULL);
+        dst = ufo_buffer_get_host_array (output, NULL);
+        memcpy (dst, src + priv->current * priv->size / sizeof(gfloat), priv->size);
+    }
+    priv->current++;
+#endif
 
     return TRUE;
 }
@@ -159,6 +222,15 @@ ufo_slice_task_get_property (GObject *object,
 static void
 ufo_slice_task_finalize (GObject *object)
 {
+    UfoSliceTaskPrivate *priv;
+
+    priv = UFO_SLICE_TASK_GET_PRIVATE (object);
+
+    if (priv->kernel) {
+        UFO_RESOURCES_CHECK_CLERR (clReleaseKernel (priv->kernel));
+        priv->kernel = NULL;
+    }
+
     G_OBJECT_CLASS (ufo_slice_task_parent_class)->finalize (object);
 }
 
